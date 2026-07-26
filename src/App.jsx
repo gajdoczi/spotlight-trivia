@@ -22,18 +22,46 @@ const FONT_DISPLAY = "'Big Shoulders Display', sans-serif";
 const FONT_BODY = "'Inter', sans-serif";
 const FONT_MONO = "'Space Mono', monospace";
 
-const VALUES = [100, 200, 300, 400, 500];
+const VALUES1 = [100, 200, 300, 400, 500];
+const VALUES2 = [200, 400, 600, 800, 1000];
 const uid = () => Date.now().toString(36) + Math.random().toString(36).slice(2, 8);
+
+function makeCategories(values, count = 5) {
+  return Array.from({ length: count }, () => ({
+    name: '',
+    clues: values.map((v) => ({ value: v, question: '', answer: '', image: '' })),
+  }));
+}
+
+function makeRound(name, values) {
+  return { name, categories: makeCategories(values) };
+}
 
 function emptyBoard() {
   return {
     id: uid(),
     title: '',
-    categories: Array.from({ length: 5 }, () => ({
-      name: '',
-      clues: VALUES.map((v) => ({ value: v, question: '', answer: '', image: '' })),
-    })),
+    rounds: [makeRound('Jeopardy', VALUES1), makeRound('Double Jeopardy', VALUES2)],
   };
+}
+
+// Older saved boards only had a flat `categories` list (single round), or a
+// single-round `rounds` array. Bring anything we load up to the current
+// two-round shape so a second, fully editable round is always available.
+function normalizeBoard(board) {
+  if (!board) return board;
+  if (Array.isArray(board.rounds) && board.rounds.length >= 2) return board;
+  if (Array.isArray(board.rounds) && board.rounds.length === 1) {
+    return { ...board, rounds: [board.rounds[0], makeRound('Double Jeopardy', VALUES2)] };
+  }
+  if (Array.isArray(board.categories)) {
+    return {
+      id: board.id,
+      title: board.title,
+      rounds: [{ name: 'Jeopardy', categories: board.categories }, makeRound('Double Jeopardy', VALUES2)],
+    };
+  }
+  return board;
 }
 
 // Storage layer: uses the browser's localStorage, so boards are saved
@@ -56,7 +84,7 @@ async function setIndex(list) {
 async function getBoard(id) {
   try {
     const raw = localStorage.getItem(LS_PREFIX + 'board:' + id);
-    return raw ? JSON.parse(raw) : null;
+    return raw ? normalizeBoard(JSON.parse(raw)) : null;
   } catch {
     return null;
   }
@@ -73,16 +101,20 @@ async function deleteBoardStorage(id) {
 }
 
 function boardStats(board) {
-  const catCount = board.categories.length;
+  const rounds = board.rounds || [];
+  let catCount = 0;
   let filled = 0;
   let total = 0;
-  board.categories.forEach((c) =>
-    c.clues.forEach((cl) => {
-      total++;
-      if (cl.question.trim() && cl.answer.trim()) filled++;
+  rounds.forEach((r) =>
+    r.categories.forEach((c) => {
+      catCount++;
+      c.clues.forEach((cl) => {
+        total++;
+        if (cl.question.trim() && cl.answer.trim()) filled++;
+      });
     })
   );
-  return { catCount, filled, total };
+  return { catCount, filled, total, roundCount: rounds.length };
 }
 
 export default function App() {
@@ -93,6 +125,7 @@ export default function App() {
   const [teams, setTeams] = useState([]);
   const [usedTiles, setUsedTiles] = useState({});
   const [scores, setScores] = useState({});
+  const [roundIndex, setRoundIndex] = useState(0);
 
   useEffect(() => {
     (async () => {
@@ -134,6 +167,7 @@ export default function App() {
       id: toSave.id,
       title: toSave.title,
       catCount: stats.catCount,
+      roundCount: stats.roundCount,
       filled: stats.filled,
       total: stats.total,
       updatedAt: Date.now(),
@@ -157,6 +191,7 @@ export default function App() {
     const saved = await saveActiveBoard(board);
     setActiveBoard(saved);
     setUsedTiles({});
+    setRoundIndex(0);
     setView('teams');
   };
 
@@ -166,7 +201,13 @@ export default function App() {
     setTeams(teamList);
     setScores(initScores);
     setUsedTiles({});
+    setRoundIndex(0);
     setView('play');
+  };
+
+  const continueToNextRound = () => {
+    setRoundIndex((r) => r + 1);
+    setUsedTiles({});
   };
 
   const playAgainSameTeams = () => {
@@ -174,6 +215,7 @@ export default function App() {
     teams.forEach((t) => (initScores[t.id] = 0));
     setScores(initScores);
     setUsedTiles({});
+    setRoundIndex(0);
     setView('play');
   };
 
@@ -203,6 +245,7 @@ export default function App() {
               if (b) {
                 setActiveBoard(b);
                 setUsedTiles({});
+                setRoundIndex(0);
                 setView('teams');
               }
             }}
@@ -223,6 +266,8 @@ export default function App() {
         {view === 'play' && activeBoard && (
           <PlayBoardView
             board={activeBoard}
+            roundIndex={roundIndex}
+            onContinueRound={continueToNextRound}
             teams={teams}
             scores={scores}
             setScores={setScores}
@@ -459,7 +504,7 @@ function HomeView({ boards, loading, onNew, onEdit, onDelete, onPlay }) {
                   {b.title || 'Untitled game'}
                 </div>
                 <div style={{ fontFamily: FONT_MONO, fontSize: 11.5, color: complete ? C.green : C.gold }}>
-                  {b.catCount} categories · {b.filled}/{b.total} clues filled
+                  {b.roundCount || 1} round{(b.roundCount || 1) > 1 ? 's' : ''} · {b.filled}/{b.total} clues filled
                 </div>
               </div>
               <div style={{ display: 'flex', gap: 8, marginTop: 4 }}>
@@ -534,38 +579,46 @@ function btnSmall(bg, fg, outline) {
 
 /* ---------- EDITOR ---------- */
 function EditorView({ board, setBoard, onSave, onPlay, onBack }) {
+  const [activeRound, setActiveRound] = useState(0);
   const [editing, setEditing] = useState(null); // {ci, qi}
   const [savedFlash, setSavedFlash] = useState(false);
   const savingRef = useRef(false);
 
+  const round = board.rounds[activeRound];
+
   const updateTitle = (title) => setBoard({ ...board, title });
 
+  const setRoundCategories = (categories) => {
+    const rounds = board.rounds.map((r, i) => (i === activeRound ? { ...r, categories } : r));
+    setBoard({ ...board, rounds });
+  };
+
   const updateCategoryName = (ci, name) => {
-    const categories = board.categories.map((c, i) => (i === ci ? { ...c, name } : c));
-    setBoard({ ...board, categories });
+    setRoundCategories(round.categories.map((c, i) => (i === ci ? { ...c, name } : c)));
   };
 
   const addCategory = () => {
-    if (board.categories.length >= 6) return;
-    const categories = [
-      ...board.categories,
-      { name: '', clues: VALUES.map((v) => ({ value: v, question: '', answer: '', image: '' })) },
-    ];
-    setBoard({ ...board, categories });
+    if (round.categories.length >= 6) return;
+    const values = round.categories[0]?.clues.map((c) => c.value) || VALUES1;
+    setRoundCategories([
+      ...round.categories,
+      { name: '', clues: values.map((v) => ({ value: v, question: '', answer: '', image: '' })) },
+    ]);
   };
 
   const removeCategory = (ci) => {
-    if (board.categories.length <= 3) return;
-    setBoard({ ...board, categories: board.categories.filter((_, i) => i !== ci) });
+    if (round.categories.length <= 3) return;
+    setRoundCategories(round.categories.filter((_, i) => i !== ci));
   };
 
   const updateClue = (ci, qi, patch) => {
-    const categories = board.categories.map((c, i) => {
-      if (i !== ci) return c;
-      const clues = c.clues.map((cl, j) => (j === qi ? { ...cl, ...patch } : cl));
-      return { ...c, clues };
-    });
-    setBoard({ ...board, categories });
+    setRoundCategories(
+      round.categories.map((c, i) => {
+        if (i !== ci) return c;
+        const clues = c.clues.map((cl, j) => (j === qi ? { ...cl, ...patch } : cl));
+        return { ...c, clues };
+      })
+    );
   };
 
   const doSave = async () => {
@@ -610,19 +663,55 @@ function EditorView({ board, setBoard, onSave, onPlay, onBack }) {
           marginLeft: 46,
         }}
       >
-        {stats.filled}/{stats.total} clues filled · click a tile to write it
+        {stats.filled}/{stats.total} clues filled across both rounds · click a tile to write it
+      </div>
+
+      <div style={{ display: 'flex', gap: 8, marginBottom: 18, marginLeft: 46 }}>
+        {board.rounds.map((r, i) => {
+          const rFilled = r.categories.reduce(
+            (s, c) => s + c.clues.filter((cl) => cl.question.trim() && cl.answer.trim()).length,
+            0
+          );
+          const rTotal = r.categories.reduce((s, c) => s + c.clues.length, 0);
+          const active = i === activeRound;
+          return (
+            <button
+              key={i}
+              onClick={() => setActiveRound(i)}
+              style={{
+                background: active ? C.gold : 'transparent',
+                color: active ? C.bg : C.white,
+                border: `1px solid ${active ? C.gold : C.slateDark}`,
+                borderRadius: 8,
+                padding: '9px 16px',
+                cursor: 'pointer',
+                display: 'flex',
+                flexDirection: 'column',
+                alignItems: 'flex-start',
+                gap: 2,
+              }}
+            >
+              <span style={{ fontFamily: FONT_DISPLAY, fontWeight: 900, fontSize: 14, textTransform: 'uppercase' }}>
+                Round {i + 1}: {r.name}
+              </span>
+              <span style={{ fontFamily: FONT_MONO, fontSize: 10.5, opacity: 0.85 }}>
+                {rFilled}/{rTotal} filled
+              </span>
+            </button>
+          );
+        })}
       </div>
 
       <div style={{ overflowX: 'auto', paddingBottom: 8 }}>
         <div
           style={{
             display: 'grid',
-            gridTemplateColumns: `repeat(${board.categories.length}, minmax(150px, 1fr))`,
+            gridTemplateColumns: `repeat(${round.categories.length}, minmax(150px, 1fr))`,
             gap: 10,
-            minWidth: board.categories.length * 150,
+            minWidth: round.categories.length * 150,
           }}
         >
-          {board.categories.map((cat, ci) => (
+          {round.categories.map((cat, ci) => (
             <div key={ci} style={{ display: 'flex', flexDirection: 'column', gap: 10 }}>
               <div style={{ position: 'relative' }}>
                 <input
@@ -645,7 +734,7 @@ function EditorView({ board, setBoard, onSave, onPlay, onBack }) {
                     outline: 'none',
                   }}
                 />
-                {board.categories.length > 3 && (
+                {round.categories.length > 3 && (
                   <button
                     onClick={() => removeCategory(ci)}
                     title="Remove category"
@@ -703,9 +792,9 @@ function EditorView({ board, setBoard, onSave, onPlay, onBack }) {
       </div>
 
       <div style={{ display: 'flex', gap: 10, marginTop: 18, flexWrap: 'wrap', alignItems: 'center' }}>
-        {board.categories.length < 6 && (
+        {round.categories.length < 6 && (
           <button onClick={addCategory} style={btnSmall('transparent', C.white, true)}>
-            <Plus size={14} /> Add category
+            <Plus size={14} /> Add category to round {activeRound + 1}
           </button>
         )}
         <div style={{ flex: 1 }} />
@@ -722,8 +811,8 @@ function EditorView({ board, setBoard, onSave, onPlay, onBack }) {
 
       {editing && (
         <ClueEditModal
-          category={board.categories[editing.ci]}
-          clue={board.categories[editing.ci].clues[editing.qi]}
+          category={round.categories[editing.ci]}
+          clue={round.categories[editing.ci].clues[editing.qi]}
           onChange={(patch) => updateClue(editing.ci, editing.qi, patch)}
           onClose={() => setEditing(null)}
         />
@@ -972,6 +1061,11 @@ function TeamSetupView({ board, onBack, onStart }) {
       <h1 style={{ fontFamily: FONT_DISPLAY, fontWeight: 900, fontSize: 34, margin: '0 0 6px' }}>
         Who's playing?
       </h1>
+      {board.rounds && board.rounds.length > 1 && (
+        <div style={{ color: C.slate, fontSize: 13, marginBottom: 10 }}>
+          This game has {board.rounds.length} rounds — you'll move to {board.rounds[1].name} once round 1 is done.
+        </div>
+      )}
       {stats.filled < stats.total && (
         <div style={{ color: C.gold, fontSize: 13, marginBottom: 18 }}>
           Heads up — {stats.total - stats.filled} clue(s) are still empty and will show as blank tiles.
@@ -1048,11 +1142,14 @@ function TeamSetupView({ board, onBack, onStart }) {
 }
 
 /* ---------- PLAY BOARD ---------- */
-function PlayBoardView({ board, teams, scores, setScores, usedTiles, setUsedTiles, onEndGame, onExit }) {
+function PlayBoardView({ board, roundIndex, onContinueRound, teams, scores, setScores, usedTiles, setUsedTiles, onEndGame, onExit }) {
   const [openClue, setOpenClue] = useState(null); // {ci, qi}
   const [revealed, setRevealed] = useState(false);
 
-  const totalTiles = board.categories.reduce((s, c) => s + c.clues.length, 0);
+  const round = board.rounds[roundIndex];
+  const hasNextRound = roundIndex < board.rounds.length - 1;
+
+  const totalTiles = round.categories.reduce((s, c) => s + c.clues.length, 0);
   const usedCount = Object.keys(usedTiles).length;
   const allDone = usedCount >= totalTiles;
 
@@ -1080,11 +1177,23 @@ function PlayBoardView({ board, teams, scores, setScores, usedTiles, setUsedTile
     <div style={{ animation: 'fadeIn 0.3s ease' }}>
       <div
         style={{
+          fontFamily: FONT_MONO,
+          fontSize: 11.5,
+          color: C.gold,
+          letterSpacing: 1.5,
+          marginTop: 20,
+          textTransform: 'uppercase',
+        }}
+      >
+        Round {roundIndex + 1} of {board.rounds.length} · {round.name}
+      </div>
+      <div
+        style={{
           display: 'flex',
           flexWrap: 'wrap',
           gap: 10,
           alignItems: 'center',
-          margin: '20px 0 18px',
+          margin: '10px 0 18px',
         }}
       >
         {teams.map((t) => (
@@ -1118,7 +1227,31 @@ function PlayBoardView({ board, teams, scores, setScores, usedTiles, setUsedTile
         </button>
       </div>
 
-      {allDone && (
+      {allDone && hasNextRound && (
+        <div
+          style={{
+            background: `${C.gold}22`,
+            border: `1px solid ${C.gold}66`,
+            borderRadius: 10,
+            padding: '12px 16px',
+            marginBottom: 16,
+            display: 'flex',
+            alignItems: 'center',
+            justifyContent: 'space-between',
+            flexWrap: 'wrap',
+            gap: 10,
+          }}
+        >
+          <span style={{ fontSize: 14 }}>
+            {round.name} is complete. Ready for {board.rounds[roundIndex + 1].name}?
+          </span>
+          <button onClick={onContinueRound} style={btnPrimary()}>
+            <Play size={16} /> Start {board.rounds[roundIndex + 1].name}
+          </button>
+        </div>
+      )}
+
+      {allDone && !hasNextRound && (
         <div
           style={{
             background: `${C.gold}22`,
@@ -1144,12 +1277,12 @@ function PlayBoardView({ board, teams, scores, setScores, usedTiles, setUsedTile
         <div
           style={{
             display: 'grid',
-            gridTemplateColumns: `repeat(${board.categories.length}, minmax(140px, 1fr))`,
+            gridTemplateColumns: `repeat(${round.categories.length}, minmax(140px, 1fr))`,
             gap: 8,
-            minWidth: board.categories.length * 140,
+            minWidth: round.categories.length * 140,
           }}
         >
-          {board.categories.map((cat, ci) => (
+          {round.categories.map((cat, ci) => (
             <div key={ci} style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
               <div
                 style={{
@@ -1209,8 +1342,8 @@ function PlayBoardView({ board, teams, scores, setScores, usedTiles, setUsedTile
 
       {openClue && (
         <ClueOverlay
-          category={board.categories[openClue.ci]}
-          clue={board.categories[openClue.ci].clues[openClue.qi]}
+          category={round.categories[openClue.ci]}
+          clue={round.categories[openClue.ci].clues[openClue.qi]}
           revealed={revealed}
           onReveal={() => setRevealed(true)}
           teams={teams}

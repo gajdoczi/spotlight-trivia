@@ -1,4 +1,3 @@
-<<<<<<< HEAD
 # Spotlight Trivia
 
 A self-hosted, no-subscription Jeopardy-style board builder and host tool.
@@ -23,6 +22,3 @@ This outputs a static `dist/` folder that can be served by any static host (Rend
 
 - Boards are saved in the browser's `localStorage` — per browser, per device. There is no server/database, so boards made on one device/browser won't show up on another.
 - Uploaded clue images are stored as base64 inside `localStorage`, which most browsers cap around 5–10MB total. Prefer pasting an image link over uploading for large images.
-=======
-# spotlight-trivia
->>>>>>> 536fc981d122b67340d4c91bf144e5e6c5a43ca9
